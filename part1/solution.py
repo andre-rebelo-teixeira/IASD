@@ -80,13 +80,3 @@ class BAProblem:
                     if not (vi + vessel["si"] <= vj or vj + other_vessel["si"] <= vi):
                         return False
         return True
-
-
-if __name__ == "__main__":
-    with open("input.dat", "r") as fh:
-        problem = BAProblem()
-        problem.load(fh)
-
-    example_solution = [(0, 0), (3, 0), (6, 0)]
-    print("Cost of solution:", problem.cost(example_solution))
-    print("Is solution valid?", problem.check(example_solution))
