@@ -73,10 +73,14 @@ class BAProblem:
             vessel = self.vessels[i]
             if vi + vessel["si"] > self.S:
                 return False
-            for j in range(i + 1, self.N):
+            
+            if ui < vessel["ai"]:
+                return False
+            
+            for j in range(i +1 , self.N):
                 uj, vj = sol[j]
                 other_vessel = self.vessels[j]
-                if not (ui + vessel["pi"] <= uj or uj + other_vessel["pi"] <= ui):
-                    if not (vi + vessel["si"] <= vj or vj + other_vessel["si"] <= vi):
+                if (ui + vessel["pi"] > uj and uj + other_vessel["pi"] > ui):
+                    if (vi + vessel["si"] > vj and vj + other_vessel["si"] > vi):
                         return False
         return True
