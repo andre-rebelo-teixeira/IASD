@@ -4,6 +4,9 @@ import time
 import os
 import numpy as np
 
+from cProfile import Profile
+from pstats import SortKey, Stats
+
 class State:
     '''
     A class to represent a state in the BAProblem class
@@ -19,9 +22,10 @@ class State:
         __hash__(): Get the hash of the object
         __eq__(): Check if the object is equal to another object
     '''
-    def __init__(self, time : int, vessels : np.ndarray):
+    def __init__(self, time : int, vessels : np.ndarray, cost = 0):
         self.time = time
         self.vessels = vessels
+        self.cost = cost
         # where the m is the asssigned mooring time, b is the assigned berth time and i is the index of the boat
         # vessels is a numpy array with N lines an 3 columns where N is the number of boats
         # the first column is the mooring time, the second column is the berth time and the third column is the index of the boat
@@ -47,7 +51,7 @@ class State:
             Returns:
                 int: The hash of the object
         '''
-        return hash((self.time, np.array2string(self.vessels)))
+        return hash((self.time, self.vessels.tobytes()))
 
     def __eq__(self, other) -> bool:
         '''
@@ -58,8 +62,11 @@ class State:
 
             Returns:
                 bool: True if the objects are equal, False otherwise
-        '''
-        return self.time == other.time and self.vessels == other.vessels
+    ('''
+        return (self.vessels == other.vessels).all()
+
+    def __lt__(self, other):
+        return self.cost < other.cost
 
 class BAProblem(search.Problem):
     def __init__(self):
@@ -94,7 +101,7 @@ class BAProblem(search.Problem):
         vessels_state_array = np.ones((self.N, 3), dtype=int) * -1;
         vessels_state_array[:, 2] = np.arange(self.N)
 
-        self.initial = State(0, vessels_state_array)
+        self.initial = State(0, vessels_state_array, 0)
 
     def result(self, state : State, action : tuple):
         """
@@ -107,7 +114,7 @@ class BAProblem(search.Problem):
         if vessel_idx != -1:
             new_vessels = state.vessels.copy()  # Copy the current vessels list
             new_vessels[vessel_idx, 0:2] = [state_time, berth_space]
-            return State(state.time, new_vessels)  # Return a new State object
+            return State(state.time, new_vessels, state.cost + self.compute_cost(state, action))  # Return a new State object
 
         ## Action is to advance the time
         else:
@@ -147,13 +154,17 @@ class BAProblem(search.Problem):
 
         boats_arrived = [boat for boat in boats_not_scheduled if state.time >= self.vessels[boat[2]]["a"]]
 
+        actions = []
+
+
+
         for boat in boats_arrived:
             vessel_info = self.vessels[boat[2]]
             ## Get all the position the boat can be moored into the berth
             convolved_spaces = np.convolve(berth, np.ones(vessel_info["s"], dtype=int), mode='valid')
             open_space = np.where(convolved_spaces ==  vessel_info["s"])[0]
 
-            actions = [(state.time, space, boat[2]) for space in open_space]
+            actions.extend([(state.time, space, boat[2]) for space in open_space])
 
         if actions == []:
             actions.append((state.time + 1, -1, -1))
@@ -191,31 +202,27 @@ class BAProblem(search.Problem):
             Returns a solution using the specified format.
         """
         time_start = time.time()
-        solution = search.breadth_first_tree_search(self)
+        solution = search.best_first_graph_search(self, lambda node : node.path_cost, display=False)
         if solution is not None:
             return solution.state.vessels_position
 
-    def compare_searchers(self, searchers = [
-        search.breadth_first_tree_search,
-        search.depth_first_graph_search,
-        search.breadth_first_graph_search,
-        search.uniform_cost_search,
-        search.depth_limited_search,
-        search.iterative_deepening_search]):
 
-            for searcher in searchers:
-                print(searcher.__name__)
-                p = search.InstrumentedProblem(self)
-                start = time.time()
-                solution = searcher(p)
-                elapsed = time.time() - start
-                print('Solution:', solution)
-                print('Elapsed:', elapsed)
-                print('Path cost:', p.path_cost)
-                print('Nodes expanded:', p.succs)
-                print('Nodes generated:', p.states)
-                print('Branching factor:', p.succs / p.states)
-                print('')
+    def compute_cost(self, state, action):
+        '''
+        Compute the cost of an action
+        '''
+        time, berth_space, vessel_idx = action
+        vessels_not_schedule = state.vessels[state.vessels[:, 0] == -1, :]
+
+        total_cost = 0
+
+        for vessel in vessels_not_schedule:
+            if self.vessels[vessel[2]]["a"] < state.time:
+                ## Compute the best case cost for all the vehicles that are not yet scheduled but are already in waiting
+                total_cost += (state.time + 1 + self.vessels[vessel[2]]["p"] - self.vessels[vessel[2]]["a"]) + self.vessels[vessel[2]]["w"]
+
+        return total_cost +  self.vessels[vessel_idx]["w"] * (time - self.vessels[vessel_idx]["a"] + self.vessels[vessel_idx]["p"])
+
 if __name__ == "__main__":
     def  get_test_files(test_dir = 'Tests'):
         if test_dir  in os.listdir():
@@ -225,8 +232,17 @@ if __name__ == "__main__":
     test_files = get_test_files()
 
     ## Without profiling
+
+    test_files = [test for test in test_files if '108' in test]
+
     for test in test_files:
         with open(test) as fh:
             problem = BAProblem()
             problem.load(fh)
-            print(test, ' ', problem.solve())
+            print(f"Test {test}")
+
+            with Profile() as profile:
+                print(f"Solution is {problem.solve()}" )
+                (
+                    Stats(profile).sort_stats('cumulative').print_stats()
+                )
