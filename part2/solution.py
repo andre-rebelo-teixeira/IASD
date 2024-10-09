@@ -13,7 +13,7 @@ class State:
     """
     A class to represent a state in the BAProblem class
 
-    Since the __hash__ and __eq__ methods are implemented, the State class can be used as a key in a dictionary, meaning we donot need to lose time checking if a state is already in the explored set.
+    Since the __hash__ and __eq__ methods are implemented, the State class can be used as a key in a dictionary, meaning we do not need to lose time checking if a state is already in the explored set.
 
     Attributes:
         time (int): The time of the state
@@ -29,7 +29,7 @@ class State:
         self.time = time
         self.vessels = vessels
         self.cost = cost
-        # where the m is the asssigned mooring time, b is the assigned berth time and i is the index of the boat
+        # where the m is the assigned mooring time, b is the assigned berth time and i is the index of the boat
         # vessels is a numpy array with N lines an 3 columns where N is the number of boats
         # the first column is the mooring time, the second column is the berth time and the third column is the index of the boat
 
@@ -99,7 +99,7 @@ class BAProblem(search.Problem):
         self.S, self.N = map(int, data_lines[0].split())
         self.vessels = []
         for i in range(1, self.N + 1):
-            # arrival time, processing time, section size, weigth
+            # arrival time, processing time, section size, weight
             ai, pi, si, wi = map(int, data_lines[i].split())
             self.vessels.append({"a": ai, "p": pi, "s": si, "w": wi})
 
@@ -116,17 +116,22 @@ class BAProblem(search.Problem):
         """
         state_time, berth_space, vessel_idx = action
 
-        ## Action is to moore a boat
+        ## Action is to moor a vessel
         if vessel_idx != -1:
-            new_vessels = state.vessels.copy()  # Copy the current vessels list
+            new_vessels = state.vessels.copy()  # Copy the current vessels array
             new_vessels[vessel_idx, 0:2] = [state_time, berth_space]
             return State(
-                state_time, new_vessels, state.cost
+                state_time, new_vessels, state.cost + self.compute_cost(state, action)
             )  # Return a new State object
 
         ## Action is to advance the time
         else:
-            return State(state_time, state.vessels.copy(), state.cost)
+            # Advance time to state_time
+            return State(
+                state_time,
+                state.vessels.copy(),
+                state.cost + self.compute_cost(state, action),
+            )
 
     def actions(self, state: State) -> list:
         """
@@ -137,54 +142,84 @@ class BAProblem(search.Problem):
 
         vessel_state_array = state.vessels
 
-        ## Get the boats that are not yet scheduled
+        # Get the vessels that are not yet scheduled
         boats_not_scheduled = vessel_state_array[
             (vessel_state_array[:, MOORING_TIME] == -1), :
-        ]  ## Get the boats that are scheduled
+        ]  # Get the vessels that are not scheduled
 
+        # Get the vessels that are scheduled
         boats_scheduled = vessel_state_array[
             vessel_state_array[:, MOORING_TIME] != -1, :
         ]
 
-        ## Create array represent berth space
+        # Create array representing berth space
         berth = np.ones(self.S, dtype=int)
 
-        ## Fill the berth array with the boats that are scheduled
+        # Build a list of currently scheduled vessels and their processing end times
+        scheduled_vessels_end_times = []
+
+        # Fill the berth array with the vessels that are scheduled
         for boat in boats_scheduled:
-            ## Get the vessel information that came from the input file using the index of the boat
+            # Get the vessel information that came from the input file using the index of the vessel
             vessel_info = self.vessels[boat[VESSEL_INDEX]]
 
-            if state.time < boat[MOORING_TIME] + vessel_info["p"]:
+            processing_end_time = boat[MOORING_TIME] + vessel_info["p"]
+
+            if state.time >= boat[MOORING_TIME] and state.time < processing_end_time:
+                # Vessel is currently in berth
                 berth[boat[BERTH_SECTION] : boat[BERTH_SECTION] + vessel_info["s"]] = 0
 
-        ## Compute from the boats that are not scheduled the ones that have already arrived to the port and are awaiting mooring
+            scheduled_vessels_end_times.append(processing_end_time)
 
-        boats_arrived = []
-        # boats_arrived = boats_not_scheduled[boats_not_scheduled[:, 0] <= state.time, :]
-
+        # Get vessels that have arrived and are not yet scheduled
         boats_arrived = [
             boat
             for boat in boats_not_scheduled
-            if state.time >= self.vessels[boat[VESSEL_INDEX]]["a"]
+            if self.vessels[boat[VESSEL_INDEX]]["a"] <= state.time
         ]
 
         actions = []
 
         for boat in boats_arrived:
             vessel_info = self.vessels[boat[VESSEL_INDEX]]
-            ## Get all the position the boat can be moored into the berth
+            # Get all the positions the vessel can be moored into the berth
             convolved_spaces = np.convolve(
                 berth, np.ones(vessel_info["s"], dtype=int), mode="valid"
             )
-            open_space = np.where(convolved_spaces == vessel_info["s"])[MOORING_TIME]
+            open_space = np.where(convolved_spaces == vessel_info["s"])[0]
 
             actions.extend(
                 [(state.time, space, boat[VESSEL_INDEX]) for space in open_space]
             )
 
-        actions.append((state.time + 1, -1, -1))
+        if actions:
+            return actions
 
-        return actions
+        # If no actions are possible, advance time to the next event
+
+        # Next arrival time among the vessels not yet arrived and not scheduled
+        arrival_times = [
+            self.vessels[boat[VESSEL_INDEX]]["a"]
+            for boat in boats_not_scheduled
+            if self.vessels[boat[VESSEL_INDEX]]["a"] > state.time
+        ]
+
+        # Next time when berth becomes available
+        completion_times = [
+            end_time
+            for end_time in scheduled_vessels_end_times
+            if end_time > state.time
+        ]
+
+        next_times = arrival_times + completion_times
+
+        if next_times:
+            next_time = min(next_times)
+            # Advance time to next_time
+            return [(next_time, -1, -1)]
+        else:
+            # No more events, so no actions
+            return []
 
     def goal_test(self, state):
         """
@@ -213,24 +248,33 @@ class BAProblem(search.Problem):
         """
         Compute the cost of an action
         """
-        time, berth_space, vessel_idx = action
-        vessels_not_schedule = state.vessels[state.vessels[:, MOORING_TIME] == -1, :]
+        new_time, berth_space, vessel_idx = action
 
-        ## Allocated vessels cost
+        time_diff = new_time - state.time
 
         total_cost = 0
-        if vessel_idx != -1:
-            vessel = self.vessels[vessel_idx]
-            total_cost += vessel["w"] * (time + vessel["p"] - vessel["a"])
 
-        for vessel in vessels_not_schedule:
-            if self.vessels[vessel[VESSEL_INDEX]]["a"] < state.time:
-                ## Compute the best case cost for all the vehicles that are not yet scheduled but are already in waiting
-                total_cost += (
-                    state.time
-                    + self.vessels[vessel[VESSEL_INDEX]]["p"]
-                    - self.vessels[vessel[VESSEL_INDEX]]["a"]
-                ) * self.vessels[vessel[VESSEL_INDEX]]["w"]
+        if vessel_idx != -1:
+            # Mooring a vessel
+            vessel = self.vessels[vessel_idx]
+            waiting_time = new_time - vessel["a"]
+            total_cost += vessel["w"] * waiting_time
+        else:
+            # Advancing time, need to account for waiting cost during time_diff
+            # For vessels that have arrived and are not yet scheduled
+            vessels_not_scheduled = state.vessels[
+                state.vessels[:, MOORING_TIME] == -1, :
+            ]
+            for vessel_state in vessels_not_scheduled:
+                vessel_idx = vessel_state[VESSEL_INDEX]
+                vessel_info = self.vessels[vessel_idx]
+                arrival_time = vessel_info["a"]
+                if arrival_time < new_time:
+                    # Vessel is waiting during the time interval
+                    # Calculate overlap between [max(arrival_time, state.time), new_time]
+                    start_wait = max(arrival_time, state.time)
+                    waiting_time = new_time - start_wait
+                    total_cost += vessel_info["w"] * waiting_time
 
         return total_cost
 
@@ -248,9 +292,7 @@ if __name__ == "__main__":
 
     test_files = get_test_files()
 
-    ## Without profiling
-
-    test_files = [test for test in test_files if "101" in test]
+    test_files = [test for test in test_files if "108" in test]
 
     for test in test_files:
         with open(test) as fh:
@@ -259,6 +301,7 @@ if __name__ == "__main__":
             print(f"Test {test}")
 
             time_start = time.time()
-            print(f"Solution is {problem.solve()}")
+            solution = problem.solve()
+            print(f"Solution is {solution}")
             print(f"Time elapsed: {time.time() - time_start}")
             print("\n")
