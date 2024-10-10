@@ -29,7 +29,7 @@ for test in passed:
         problem.load(f)
         sol = problem.solve()
 
-        if str(sol).strip() == test[1].strip():
+        if problem.cost(sol) == float(test[2]):
             print(f"    Test {test[0]}: Passed")
         else:
             print(f"    Test {test[0]}: Failed")
@@ -41,7 +41,7 @@ for test in not_passed:
         problem.load(f)
         sol = problem.solve()
 
-        if str(sol).strip() != test[1].strip():
+        if problem.cost(sol) < float(test[2]):
             print(f"    Test {test[0]}: Maybe passed")
         else:
             print(f"    Test {test[0]}: Failed")

@@ -85,6 +85,26 @@ class BAProblem(search.Problem):
         ## Create a dictionary of state for a vessel
         return {"m": morring_time, "b": berth_section, "i": index}
 
+    def cost(self, sol):
+        """
+        Compute the total weighted flow time cost of a given solution.
+
+        Parameters:
+        - sol (list): A list of tuples representing the solution, where each tuple contains
+                      the starting mooring time (ui) and the starting berth section (vi)
+                      for each vessel.
+
+        Returns:
+        - int: The total weighted flow time cost.
+        """
+        total_cost = 0
+        for i, (ui, vi) in enumerate(sol):
+            vessel = self.vessels[i]
+            ci = ui + vessel["p"]
+            fi = ci - vessel["a"]
+            total_cost += vessel["w"] * fi
+        return total_cost
+
     def load(self, fh):
         """
         Load a BAP problem from the file object.
