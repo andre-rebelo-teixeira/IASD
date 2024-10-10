@@ -162,7 +162,6 @@ class BAProblem(search.Problem):
         for boat in boats_scheduled:
             # Get the vessel information that came from the input file using the index of the vessel
             vessel_info = self.vessels[boat[VESSEL_INDEX]]
-
             processing_end_time = boat[MOORING_TIME] + vessel_info["p"]
 
             if state.time >= boat[MOORING_TIME] and state.time < processing_end_time:
@@ -229,9 +228,7 @@ class BAProblem(search.Problem):
 
     def path_cost(self, c, state1, action, state2):
         """
-        Returns the cost of a solution path that arrives
-        at state2 from state1 via action, assuming cost c
-        to get up to state1.
+        Returns the cost of a solution path that arrives at state2 from state1 via action, assuming cost c to get up to state1.
         """
         return c + self.compute_cost(state1, action)
 
@@ -246,35 +243,29 @@ class BAProblem(search.Problem):
 
     def compute_cost(self, state, action):
         """
-        Compute the cost of an action
+        Compute the cost of an action.
+        The cost is the sum of the waiting costs for all unscheduled vessels over the time interval from state.time to new_time.
         """
         new_time, berth_space, vessel_idx = action
-
-        time_diff = new_time - state.time
-
         total_cost = 0
 
-        if vessel_idx != -1:
-            # Mooring a vessel
-            vessel = self.vessels[vessel_idx]
-            waiting_time = new_time - vessel["a"]
-            total_cost += vessel["w"] * waiting_time
-        else:
-            # Advancing time, need to account for waiting cost during time_diff
-            # For vessels that have arrived and are not yet scheduled
-            vessels_not_scheduled = state.vessels[
-                state.vessels[:, MOORING_TIME] == -1, :
-            ]
-            for vessel_state in vessels_not_scheduled:
-                vessel_idx = vessel_state[VESSEL_INDEX]
-                vessel_info = self.vessels[vessel_idx]
-                arrival_time = vessel_info["a"]
-                if arrival_time < new_time:
-                    # Vessel is waiting during the time interval
-                    # Calculate overlap between [max(arrival_time, state.time), new_time]
-                    start_wait = max(arrival_time, state.time)
-                    waiting_time = new_time - start_wait
-                    total_cost += vessel_info["w"] * waiting_time
+        # Time interval over which to calculate waiting costs
+        time_interval = new_time - state.time
+
+        # List of vessels that are not yet scheduled
+        vessels_not_scheduled = state.vessels[state.vessels[:, MOORING_TIME] == -1, :]
+
+        for vessel_state in vessels_not_scheduled:
+            vessel_idx_unscheduled = vessel_state[VESSEL_INDEX]
+            vessel_info = self.vessels[vessel_idx_unscheduled]
+            arrival_time = vessel_info["a"]
+
+            # If the vessel has arrived before the new time
+            if arrival_time < new_time:
+                # Calculate the waiting time during this interval
+                start_wait = max(arrival_time, state.time)
+                waiting_time = new_time - start_wait
+                total_cost += vessel_info["w"] * waiting_time
 
         return total_cost
 
