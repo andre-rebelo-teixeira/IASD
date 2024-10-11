@@ -197,8 +197,7 @@ class BAProblem(search.Problem):
             if self.vessels[boat[VESSEL_INDEX]]["a"] <= state.time
         ]
 
-        actions = []
-
+        # If there are arrived boats, try to schedule them
         for boat in boats_arrived:
             vessel_info = self.vessels[boat[VESSEL_INDEX]]
             # Get all the positions the vessel can be moored into the berth
@@ -211,34 +210,49 @@ class BAProblem(search.Problem):
                 [(state.time, space, boat[VESSEL_INDEX]) for space in open_space]
             )
 
-        if actions:
-            return actions
-
-        # If no actions are possible, advance time to the next event
-
-        # Next arrival time among the vessels not yet arrived and not scheduled
+        # Determine if there are boats that haven't arrived yet
         arrival_times = [
             self.vessels[boat[VESSEL_INDEX]]["a"]
             for boat in boats_not_scheduled
             if self.vessels[boat[VESSEL_INDEX]]["a"] > state.time
         ]
 
-        # Next time when berth becomes available
-        completion_times = [
-            end_time
-            for end_time in scheduled_vessels_end_times
-            if end_time > state.time
-        ]
+        if arrival_times:
+            # There are vessels that haven't arrived yet
+            # Include the option to wait regardless of whether there are scheduling actions
+            # Compute the next event times
+            completion_times = [
+                end_time
+                for end_time in scheduled_vessels_end_times
+                if end_time > state.time
+            ]
 
-        next_times = arrival_times + completion_times
+            next_times = arrival_times + completion_times
 
-        if next_times:
-            next_time = min(next_times)
-            # Advance time to next_time
-            return [(next_time, -1, -1)]
+            if next_times:
+                next_time = min(next_times)
+                # Add an action to wait until next_time
+                actions.append((next_time, -1, -1))
         else:
-            # No more events, so no actions
-            return []
+            # All vessels have arrived
+            # Only consider waiting if there are no scheduling actions
+            if not actions:
+                # No possible scheduling actions, need to wait for berth space to become available
+                completion_times = [
+                    end_time
+                    for end_time in scheduled_vessels_end_times
+                    if end_time > state.time
+                ]
+
+                if completion_times:
+                    next_time = min(completion_times)
+                    # Add an action to wait until next_time
+                    actions.append((next_time, -1, -1))
+                else:
+                    # No more events, so no actions
+                    pass
+
+        return actions
 
     def goal_test(self, state):
         """
