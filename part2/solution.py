@@ -1,8 +1,6 @@
 import search
-import utils
 import time
 import os
-import numpy as np
 
 MOORING_TIME = 0
 BERTH_SECTION = 1
@@ -11,66 +9,37 @@ VESSEL_INDEX = 2
 
 class State:
     """
-    A class to represent a state in the BAProblem class
-
-    Since the __hash__ and __eq__ methods are implemented, the State class can be used as a key in a dictionary, meaning we do not need to lose time checking if a state is already in the explored set.
+    A class to represent a state in the BAProblem class.
 
     Attributes:
-        time (int): The time of the state
-        vessels (list): A List of a dictionary of the vessels and the correct state
-
-    Methods:
-        __str__(): Get the string representation of the object
-        __hash__(): Get the hash of the object
-        __eq__(): Check if the object is equal to another object
+        time (int): The current time of the state.
+        vessels (tuple): A tuple of tuples representing vessels' states.
+        cost (int): The accumulated cost up to this state.
     """
 
-    def __init__(self, time: int, vessels: np.ndarray, cost=0):
+    def __init__(self, time: int, vessels: tuple, cost=0):
         self.time = time
-        self.vessels = vessels
+        self.vessels = vessels  # Vessels is a tuple of tuples
         self.cost = cost
-        # where the m is the assigned mooring time, b is the assigned berth time and i is the index of the boat
-        # vessels is a numpy array with N lines an 3 columns where N is the number of boats
-        # the first column is the mooring time, the second column is the berth time and the third column is the index of the boat
 
     @property
     def vessels_position(self):
-        return self.vessels[:, 0:2].tolist()
+        # Returns a list of [mooring_time, berth_section] for each vessel
+        return [vessel[:2] for vessel in self.vessels]
 
     def __str__(self) -> str:
-        """
-        Get the string representation of the object
-
-        Returns:
-            str: The string representation of the object
-
-        """
         return f"State({self.time}, {self.vessels})"
 
     def __hash__(self) -> int:
-        """
-        Get the hash of the object
-
-        Returns:
-            int: The hash of the object
-        """
-        return hash((self.time, self.vessels.tobytes()))
+        # Efficient hash using immutable vessels representation
+        return hash((self.time, self.vessels))
 
     def __eq__(self, other) -> bool:
-        """
-        Check if the object is equal to another object
-
-        Parameters:
-            other (State): The other object to compare to
-
-        Returns:
-            bool: True if the objects are equal, False otherwise
-        """
-        if self.time != other.time:
-            return False
-        return np.array_equal(self.vessels, other.vessels)
+        # Efficient equality check
+        return self.time == other.time and self.vessels == other.vessels
 
     def __lt__(self, other):
+        # For priority queue comparison
         return self.cost < other.cost
 
 
@@ -78,12 +47,8 @@ class BAProblem(search.Problem):
     def __init__(self):
         self.initial = None
         self.vessels = []
-        self.berth_size = 0
-
-    @staticmethod
-    def create_vessel_dict(morring_time, berth_section, index):
-        ## Create a dictionary of state for a vessel
-        return {"m": morring_time, "b": berth_section, "i": index}
+        self.S = 0  # Total berth size
+        self.N = 0  # Number of vessels
 
     def cost(self, sol):
         """
@@ -123,33 +88,34 @@ class BAProblem(search.Problem):
             ai, pi, si, wi = map(int, data_lines[i].split())
             self.vessels.append({"a": ai, "p": pi, "s": si, "w": wi})
 
-        ## Each vessel is a line represented by the schedule mooring time, schedule berth section and the index of the vessel
-        vessels_state_array = np.ones((self.N, 3), dtype=int) * -1
-        vessels_state_array[:, VESSEL_INDEX] = np.arange(self.N)
-
-        self.initial = State(0, vessels_state_array, 0)
+        # Initialize vessels state: (mooring_time, berth_section, vessel_index)
+        vessels_state_list = [(-1, -1, idx) for idx in range(self.N)]
+        self.initial = State(0, tuple(vessels_state_list), 0)
 
     def result(self, state: State, action: tuple):
         """
         Returns the state that results from executing
         the given action in the given state.
         """
-        state_time, berth_space, vessel_idx = action
+        new_time, berth_space, vessel_idx = action
 
-        ## Action is to moor a vessel
         if vessel_idx != -1:
-            new_vessels = state.vessels.copy()  # Copy the current vessels array
-            new_vessels[vessel_idx, 0:2] = [state_time, berth_space]
+            # Action is to moor a vessel
+            new_vessels = list(state.vessels)  # Convert to list for modification
+            vessel = list(new_vessels[vessel_idx])  # Convert to list to modify
+            vessel[MOORING_TIME] = new_time
+            vessel[BERTH_SECTION] = berth_space
+            new_vessels[vessel_idx] = tuple(vessel)  # Convert back to tuple
             return State(
-                state_time, new_vessels, state.cost + self.compute_cost(state, action)
-            )  # Return a new State object
-
-        ## Action is to advance the time
+                new_time,
+                tuple(new_vessels),
+                state.cost + self.compute_cost(state, action),
+            )
         else:
-            # Advance time to state_time
+            # Action is to wait until new_time
             return State(
-                state_time,
-                state.vessels.copy(),
+                new_time,
+                state.vessels,
                 state.cost + self.compute_cost(state, action),
             )
 
@@ -160,66 +126,67 @@ class BAProblem(search.Problem):
         """
         actions = []
 
-        vessel_state_array = state.vessels
-
         # Get the vessels that are not yet scheduled
-        boats_not_scheduled = vessel_state_array[
-            (vessel_state_array[:, MOORING_TIME] == -1), :
-        ]  # Get the vessels that are not scheduled
-
-        # Get the vessels that are scheduled
-        boats_scheduled = vessel_state_array[
-            vessel_state_array[:, MOORING_TIME] != -1, :
+        boats_not_scheduled = [
+            vessel for vessel in state.vessels if vessel[MOORING_TIME] == -1
         ]
 
-        # Create array representing berth space
-        berth = np.ones(self.S, dtype=int)
+        # Get the vessels that are scheduled
+        boats_scheduled = [
+            vessel for vessel in state.vessels if vessel[MOORING_TIME] != -1
+        ]
+
+        # Build berth occupancy
+        # Berth is represented as a list of availability at each berth section
+        berth = [1] * self.S  # 1 means available, 0 means occupied
 
         # Build a list of currently scheduled vessels and their processing end times
         scheduled_vessels_end_times = []
 
         # Fill the berth array with the vessels that are scheduled
-        for boat in boats_scheduled:
-            # Get the vessel information that came from the input file using the index of the vessel
-            vessel_info = self.vessels[boat[VESSEL_INDEX]]
-            processing_end_time = boat[MOORING_TIME] + vessel_info["p"]
+        for vessel in boats_scheduled:
+            vessel_idx = vessel[VESSEL_INDEX]
+            vessel_info = self.vessels[vessel_idx]
+            mooring_time = vessel[MOORING_TIME]
+            berth_section = vessel[BERTH_SECTION]
+            processing_end_time = mooring_time + vessel_info["p"]
 
-            if state.time >= boat[MOORING_TIME] and state.time < processing_end_time:
+            if state.time >= mooring_time and state.time < processing_end_time:
                 # Vessel is currently in berth
-                berth[boat[BERTH_SECTION] : boat[BERTH_SECTION] + vessel_info["s"]] = 0
+                s = berth_section
+                e = berth_section + vessel_info["s"]
+                for i in range(s, e):
+                    berth[i] = 0
 
             scheduled_vessels_end_times.append(processing_end_time)
 
         # Get vessels that have arrived and are not yet scheduled
         boats_arrived = [
-            boat
-            for boat in boats_not_scheduled
-            if self.vessels[boat[VESSEL_INDEX]]["a"] <= state.time
+            vessel
+            for vessel in boats_not_scheduled
+            if self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time
         ]
 
         # If there are arrived boats, try to schedule them
-        for boat in boats_arrived:
-            vessel_info = self.vessels[boat[VESSEL_INDEX]]
-            # Get all the positions the vessel can be moored into the berth
-            convolved_spaces = np.convolve(
-                berth, np.ones(vessel_info["s"], dtype=int), mode="valid"
-            )
-            open_space = np.where(convolved_spaces == vessel_info["s"])[0]
+        for vessel in boats_arrived:
+            vessel_idx = vessel[VESSEL_INDEX]
+            vessel_info = self.vessels[vessel_idx]
+            vessel_size = vessel_info["s"]
 
-            actions.extend(
-                [(state.time, space, boat[VESSEL_INDEX]) for space in open_space]
-            )
+            # Find positions where berth[i:i+vessel_size] are all 1s (available)
+            for i in range(self.S - vessel_size + 1):
+                if all(berth[i : i + vessel_size]):
+                    actions.append((state.time, i, vessel_idx))
 
         # Determine if there are boats that haven't arrived yet
         arrival_times = [
-            self.vessels[boat[VESSEL_INDEX]]["a"]
-            for boat in boats_not_scheduled
-            if self.vessels[boat[VESSEL_INDEX]]["a"] > state.time
+            self.vessels[vessel[VESSEL_INDEX]]["a"]
+            for vessel in boats_not_scheduled
+            if self.vessels[vessel[VESSEL_INDEX]]["a"] > state.time
         ]
 
         if arrival_times:
             # There are vessels that haven't arrived yet
-            # Include the option to wait regardless of whether there are scheduling actions
             # Compute the next event times
             completion_times = [
                 end_time
@@ -248,9 +215,6 @@ class BAProblem(search.Problem):
                     next_time = min(completion_times)
                     # Add an action to wait until next_time
                     actions.append((next_time, -1, -1))
-                else:
-                    # No more events, so no actions
-                    pass
 
         return actions
 
@@ -258,20 +222,20 @@ class BAProblem(search.Problem):
         """
         Returns True if the state is a goal.
         """
-        return np.all(state.vessels[:, MOORING_TIME] != -1)
+        return all(vessel[MOORING_TIME] != -1 for vessel in state.vessels)
 
     def path_cost(self, c, state1, action, state2):
         """
-        Returns the cost of a solution path that arrives at state2 from state1 via action, assuming cost c to get up to state1.
+        Returns the cost of a solution path that arrives at state2 from state1 via action.
         """
         return c + self.compute_cost(state1, action)
 
     def solve(self):
         """
-        Calls the uninformed search algorithm chosen.
+        Calls the uniform cost search algorithm.
         Returns a solution using the specified format.
         """
-        solution = search.uniform_cost_search(self, display=False)
+        solution = search.uniform_cost_search(self)
         if solution is not None:
             return solution.state.vessels_position
 
@@ -287,10 +251,12 @@ class BAProblem(search.Problem):
         time_interval = new_time - state.time
 
         # List of vessels that are not yet scheduled
-        vessels_not_scheduled = state.vessels[state.vessels[:, MOORING_TIME] == -1, :]
+        vessels_not_scheduled = [
+            vessel for vessel in state.vessels if vessel[MOORING_TIME] == -1
+        ]
 
-        for vessel_state in vessels_not_scheduled:
-            vessel_idx_unscheduled = vessel_state[VESSEL_INDEX]
+        for vessel in vessels_not_scheduled:
+            vessel_idx_unscheduled = vessel[VESSEL_INDEX]
             vessel_info = self.vessels[vessel_idx_unscheduled]
             arrival_time = vessel_info["a"]
 
@@ -309,7 +275,7 @@ if __name__ == "__main__":
     def get_test_files(test_dir="Tests"):
         if test_dir in os.listdir():
             return [
-                test_dir + "/" + file
+                os.path.join(test_dir, file)
                 for file in os.listdir(test_dir)
                 if file.endswith(".dat")
             ]
@@ -317,7 +283,8 @@ if __name__ == "__main__":
 
     test_files = get_test_files()
 
-    test_files = [test for test in test_files if "108" in test]
+    # Optionally filter test files
+    # test_files = [test for test in test_files if "108" in test]
 
     for test in test_files:
         with open(test) as fh:
