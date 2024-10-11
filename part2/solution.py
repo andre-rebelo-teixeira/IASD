@@ -25,7 +25,7 @@ class State:
     @property
     def vessels_position(self):
         # Returns a list of [mooring_time, berth_section] for each vessel
-        return [vessel[:2] for vessel in self.vessels]
+        return list(map(lambda vessel: vessel[:2], self.vessels))
 
     def __str__(self) -> str:
         return f"State({self.time}, {self.vessels})"
@@ -78,9 +78,12 @@ class BAProblem(search.Problem):
         - fh: A file object representing the input file.
         """
         lines = fh.readlines()
-        data_lines = [
-            line.strip() for line in lines if not line.startswith("#") and line.strip()
-        ]
+        data_lines = list(
+            map(
+                lambda line: line.strip(),
+                filter(lambda line: not line.startswith("#") and line.strip(), lines),
+            )
+        )
         self.S, self.N = map(int, data_lines[0].split())
         self.vessels = []
         for i in range(1, self.N + 1):
@@ -127,14 +130,14 @@ class BAProblem(search.Problem):
         actions = []
 
         # Get the vessels that are not yet scheduled
-        boats_not_scheduled = [
-            vessel for vessel in state.vessels if vessel[MOORING_TIME] == -1
-        ]
+        boats_not_scheduled = list(
+            filter(lambda vessel: vessel[MOORING_TIME] == -1, state.vessels)
+        )
 
         # Get the vessels that are scheduled
-        boats_scheduled = [
-            vessel for vessel in state.vessels if vessel[MOORING_TIME] != -1
-        ]
+        boats_scheduled = list(
+            filter(lambda vessel: vessel[MOORING_TIME] != -1, state.vessels)
+        )
 
         # Build berth occupancy
         # Berth is represented as a list of availability at each berth section
@@ -161,11 +164,12 @@ class BAProblem(search.Problem):
             scheduled_vessels_end_times.append(processing_end_time)
 
         # Get vessels that have arrived and are not yet scheduled
-        boats_arrived = [
-            vessel
-            for vessel in boats_not_scheduled
-            if self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time
-        ]
+        boats_arrived = list(
+            filter(
+                lambda vessel: self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time,
+                boats_not_scheduled,
+            )
+        )
 
         # If there are arrived boats, try to schedule them
         for vessel in boats_arrived:
@@ -179,11 +183,15 @@ class BAProblem(search.Problem):
                     actions.append((state.time, i, vessel_idx))
 
         # Determine if there are boats that haven't arrived yet
-        arrival_times = [
-            self.vessels[vessel[VESSEL_INDEX]]["a"]
-            for vessel in boats_not_scheduled
-            if self.vessels[vessel[VESSEL_INDEX]]["a"] > state.time
-        ]
+        arrival_times = list(
+            map(
+                lambda vessel: self.vessels[vessel[VESSEL_INDEX]]["a"],
+                filter(
+                    lambda vessel: self.vessels[vessel[VESSEL_INDEX]]["a"] > state.time,
+                    boats_not_scheduled,
+                ),
+            )
+        )
 
         if arrival_times:
             # There are vessels that haven't arrived yet
@@ -251,9 +259,9 @@ class BAProblem(search.Problem):
         time_interval = new_time - state.time
 
         # List of vessels that are not yet scheduled
-        vessels_not_scheduled = [
-            vessel for vessel in state.vessels if vessel[MOORING_TIME] == -1
-        ]
+        vessels_not_scheduled = list(
+            filter(lambda vessel: vessel[MOORING_TIME] == -1, state.vessels)
+        )
 
         for vessel in vessels_not_scheduled:
             vessel_idx_unscheduled = vessel[VESSEL_INDEX]
