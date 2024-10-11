@@ -28,7 +28,7 @@ class State:
     @property
     def vessels_position(self):
         # Returns a list of [mooring_time, berth_section] for each vessel
-        return list(map(lambda vessel: vessel[:2], self.vessels))
+        return [vessel[:2] for vessel in self.vessels]
 
     def __str__(self) -> str:
         return f"State({self.time}, {self.vessels})"
@@ -47,7 +47,6 @@ class State:
 
 
 class BAProblem(search.Problem):
-
     __slots__ = ["initial", "vessels", "S", "N"]
 
     def __init__(self):
@@ -74,6 +73,7 @@ class BAProblem(search.Problem):
             ci = ui + vessel["p"]
             fi = ci - vessel["a"]
             total_cost += vessel["w"] * fi
+
         return total_cost
 
     def load(self, fh):
@@ -84,17 +84,15 @@ class BAProblem(search.Problem):
         - fh: A file object representing the input file.
         """
         lines = fh.readlines()
-        data_lines = list(
-            map(
-                lambda line: line.strip(),
-                filter(lambda line: not line.startswith("#") and line.strip(), lines),
-            )
-        )
-        self.S, self.N = map(int, data_lines[0].split())
+        data_lines = [
+            line.strip() for line in lines if line.strip() and not line.startswith("#")
+        ]
+
+        self.S, self.N = [int(x) for x in data_lines[0].split()]
         self.vessels = []
         for i in range(1, self.N + 1):
             # arrival time, processing time, section size, weight
-            ai, pi, si, wi = map(int, data_lines[i].split())
+            ai, pi, si, wi = [int(x) for x in data_lines[i].split()]
             self.vessels.append({"a": ai, "p": pi, "s": si, "w": wi})
 
         # Initialize vessels state: (mooring_time, berth_section, vessel_index)
@@ -172,12 +170,11 @@ class BAProblem(search.Problem):
             berth_cumsum[i + 1] = berth_cumsum[i] + berth[i]
 
         # Get vessels that have arrived and are not yet scheduled
-        boats_arrived = list(
-            filter(
-                lambda vessel: self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time,
-                boats_not_scheduled,
-            )
-        )
+        boats_arrived = [
+            vessel
+            for vessel in boats_not_scheduled
+            if self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time
+        ]
 
         # If there are arrived boats, try to schedule them
         for vessel in boats_arrived:
@@ -261,11 +258,6 @@ class BAProblem(search.Problem):
 
         # Time interval over which to calculate waiting costs
         time_interval = new_time - state.time
-
-        # List of vessels that are not yet scheduled
-        vessels_not_scheduled = list(
-            filter(lambda vessel: vessel[MOORING_TIME] == -1, state.vessels)
-        )
 
         per_unit_waiting_cost = sum(
             self.vessels[vessel[VESSEL_INDEX]]["w"]
