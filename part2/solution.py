@@ -17,10 +17,13 @@ class State:
         cost (int): The accumulated cost up to this state.
     """
 
+    __slots__ = ["time", "vessels", "cost", "_hash"]
+
     def __init__(self, time: int, vessels: tuple, cost=0):
         self.time = time
         self.vessels = vessels  # Vessels is a tuple of tuples
         self.cost = cost
+        self._hash = hash((self.time, self.vessels))
 
     @property
     def vessels_position(self):
@@ -32,7 +35,7 @@ class State:
 
     def __hash__(self) -> int:
         # Efficient hash using immutable vessels representation
-        return hash((self.time, self.vessels))
+        return self._hash
 
     def __eq__(self, other) -> bool:
         # Efficient equality check
@@ -44,6 +47,9 @@ class State:
 
 
 class BAProblem(search.Problem):
+
+    __slots__ = ["initial", "vessels", "S", "N"]
+
     def __init__(self):
         self.initial = None
         self.vessels = []
@@ -129,15 +135,12 @@ class BAProblem(search.Problem):
         """
         actions = []
 
-        # Get the vessels that are not yet scheduled
-        boats_not_scheduled = list(
-            filter(lambda vessel: vessel[MOORING_TIME] == -1, state.vessels)
-        )
-
-        # Get the vessels that are scheduled
-        boats_scheduled = list(
-            filter(lambda vessel: vessel[MOORING_TIME] != -1, state.vessels)
-        )
+        boats_not_scheduled = [
+            vessel for vessel in state.vessels if vessel[MOORING_TIME] == -1
+        ]
+        boats_scheduled = [
+            vessel for vessel in state.vessels if vessel[MOORING_TIME] != -1
+        ]
 
         # Build berth occupancy
         # Berth is represented as a list of availability at each berth section
@@ -163,6 +166,11 @@ class BAProblem(search.Problem):
 
             scheduled_vessels_end_times.append(processing_end_time)
 
+        # Create cumulative sum array for berth availability
+        berth_cumsum = [0] * (self.S + 1)
+        for i in range(self.S):
+            berth_cumsum[i + 1] = berth_cumsum[i] + berth[i]
+
         # Get vessels that have arrived and are not yet scheduled
         boats_arrived = list(
             filter(
@@ -179,19 +187,15 @@ class BAProblem(search.Problem):
 
             # Find positions where berth[i:i+vessel_size] are all 1s (available)
             for i in range(self.S - vessel_size + 1):
-                if all(berth[i : i + vessel_size]):
+                if berth_cumsum[i + vessel_size] - berth_cumsum[i] == vessel_size:
                     actions.append((state.time, i, vessel_idx))
 
         # Determine if there are boats that haven't arrived yet
-        arrival_times = list(
-            map(
-                lambda vessel: self.vessels[vessel[VESSEL_INDEX]]["a"],
-                filter(
-                    lambda vessel: self.vessels[vessel[VESSEL_INDEX]]["a"] > state.time,
-                    boats_not_scheduled,
-                ),
-            )
-        )
+        arrival_times = [
+            self.vessels[vessel[VESSEL_INDEX]]["a"]
+            for vessel in boats_not_scheduled
+            if self.vessels[vessel[VESSEL_INDEX]]["a"] > state.time
+        ]
 
         if arrival_times:
             # There are vessels that haven't arrived yet
@@ -263,17 +267,13 @@ class BAProblem(search.Problem):
             filter(lambda vessel: vessel[MOORING_TIME] == -1, state.vessels)
         )
 
-        for vessel in vessels_not_scheduled:
-            vessel_idx_unscheduled = vessel[VESSEL_INDEX]
-            vessel_info = self.vessels[vessel_idx_unscheduled]
-            arrival_time = vessel_info["a"]
-
-            # If the vessel has arrived before the new time
-            if arrival_time < new_time:
-                # Calculate the waiting time during this interval
-                start_wait = max(arrival_time, state.time)
-                waiting_time = new_time - start_wait
-                total_cost += vessel_info["w"] * waiting_time
+        per_unit_waiting_cost = sum(
+            self.vessels[vessel[VESSEL_INDEX]]["w"]
+            for vessel in state.vessels
+            if vessel[MOORING_TIME] == -1
+            and self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time
+        )
+        total_cost += per_unit_waiting_cost * time_interval
 
         return total_cost
 
