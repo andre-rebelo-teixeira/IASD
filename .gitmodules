@@ -1,0 +1,3 @@
+[submodule "aima"]
+	path = aima
+	url = git@github.com:aimacode/aima-python.git
