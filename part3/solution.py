@@ -1,15 +1,20 @@
-
+from ast import BitXor
 import search  # Importing the search module which contains algorithms for solving search problems
 import time  # Importing time module for time-related functions
 import os  # Importing os module for interacting with the operating system
+from itertools import groupby
 
-from cProfile import Profile  # Importing the Profile class from cProfile module for profiling
-from pstats import Stats  # Importing the Stats class from pstats module for statistics
+
+#from cProfile import (
+#    Profile,
+#)  # Importing the Profile class from cProfile module for profiling
+#from pstats import Stats  # Importing the Stats class from pstats module for statistics
 
 # Constants for vessel state indices
 MOORING_TIME = 0  # Index for the mooring time of the vessel
 BERTH_SECTION = 1  # Index for the berth section of the vessel
 VESSEL_INDEX = 2  # Index for the vessel identifier
+
 
 class State:
     """
@@ -21,9 +26,27 @@ class State:
         cost (int): The accumulated cost up to this state.
     """
 
-    __slots__ = ["time", "vessels", "cost", "_hash", "berth"]  # Define fixed slots for memory efficiency
+    __slots__ = [
+        "time",
+        "vessels",
+        "cost",
+        "_hash",
+        "berth",
+        "boats_scheduled",
+        "boats_arrived",
+        "boats_not_arrived",
+    ]  # Define fixed slots for memory efficiency
 
-    def __init__(self, time: int, vessels: tuple, berth, cost=0):
+    def __init__(
+        self,
+        time: int,
+        vessels: list,
+        berth,
+        boats_scheduled,
+        boats_arrived,
+        boats_not_arrived,
+        cost=0,
+    ):
         """
         Initializes the state with the given time, vessel states, and cost.
 
@@ -33,10 +56,17 @@ class State:
         - cost (int): The accumulated cost (default is 0).
         """
         self.time = time  # Set the current time
-        self.vessels = vessels  # Set the vessels' states
+        self.vessels =  tuple(vessels)  # Set the vessels' states
         self.berth = berth
         self.cost = cost  # Set the accumulated cost
-        self._hash = hash((self.time, self.vessels))  # Create a unique hash for the state
+
+        self.boats_scheduled = boats_scheduled
+        self.boats_arrived = boats_arrived
+        self.boats_not_arrived = boats_not_arrived
+
+        self._hash = hash(
+            (self.time, self.vessels)
+        )  # Create a unique hash for the state
 
     @property
     def vessels_position(self):
@@ -44,7 +74,9 @@ class State:
         Returns a list of [mooring_time, berth_section] for each vessel.
         This is useful for obtaining a simplified representation of the vessel positions.
         """
-        return [vessel[:2] for vessel in self.vessels]  # Extract mooring time and berth section for each vessel
+        return [
+            vessel[:2] for vessel in self.vessels
+        ]  # Extract mooring time and berth section for each vessel
 
     def __str__(self) -> str:
         """
@@ -62,7 +94,7 @@ class State:
         """
         Checks if two states are equal based on their hash values.
         """
-        #return self.vessels == other.vessels and self.time == other.time  # Compare the hash values for equality
+        # return self.vessels == other.vessels and self.time == other.time  # Compare the hash values for equality
         return self._hash == other._hash
 
     def __lt__(self, other):
@@ -70,6 +102,7 @@ class State:
         For priority queue comparison, determines if this state has a lower cost than another state.
         """
         return self.cost < other.cost  # Compare based on cost
+
 
 class BAProblem(search.Problem):
     """
@@ -82,7 +115,13 @@ class BAProblem(search.Problem):
         N (int): Number of vessels.
     """
 
-    __slots__ = ["initial", "vessels", "S", "N"]  # Define fixed slots for memory efficiency
+    __slots__ = [
+        "initial",
+        "vessels",
+        "S",
+        "N",
+        "ordered_vessels",
+    ]  # Define fixed slots for memory efficiency
 
     def __init__(self):
         """
@@ -90,6 +129,7 @@ class BAProblem(search.Problem):
         """
         self.initial = None  # Initial state
         self.vessels = []  # List of vessels
+        self.vessels_order = []
 
         self.S = 0  # Total berth size
         self.N = 0  # Number of vessels
@@ -127,17 +167,47 @@ class BAProblem(search.Problem):
             line.strip() for line in lines if line.strip() and not line.startswith("#")
         ]  # Filter out comments and empty lines
 
-        self.S, self.N = [int(x) for x in data_lines[0].split()]  # Parse total berth size and number of vessels
+        self.S, self.N = [
+            int(x) for x in data_lines[0].split()
+        ]  # Parse total berth size and number of vessels
         self.vessels = []  # Initialize vessel list
         for i in range(1, self.N + 1):
             # arrival time, processing time, section size, weight
-            ai, pi, si, wi = [int(x) for x in data_lines[i].split()]  # Parse vessel details
-            self.vessels.append({"a": ai, "p": pi, "s": si, "w": wi})  # Store vessel information in a dictionary
+            ai, pi, si, wi = [
+                int(x) for x in data_lines[i].split()
+            ]  # Parse vessel details
+            self.vessels.append(
+                {"a": ai, "p": pi, "s": si, "w": wi}
+            )  # Store vessel information in a dictionary
 
-        # Initialize vessels state: (mooring_time, berth_section, vessel_index)
-        vessels_state_list = [(-1, -1, idx) for idx in range(self.N)]  # Set initial state for each vessel
-        berth = [0] * self.N
-        self.initial = State(0, tuple(vessels_state_list),  0)  # Set the initial state
+        ## Create state variables defeenition
+        arrived_vessels = [
+            idx for idx, vessel in enumerate(self.vessels) if vessel["a"] <= 0
+        ]  ## List of all the indexes of vessels that have already arrived to the port, meaning the current time is greater or equal to their arrival time. All the vessels in this list are not yet scheduled, and are currently awaiting to be scheduled
+        not_arrived_vessels = [
+            idx for idx, vessel in enumerate(self.vessels) if vessel["a"] > 0
+        ]  ## List of all the indexes of vessels that have not yet arrived to the port, meaning the current time is less than the arrival time of the vessels
+        scheduled_vessels = (
+            []
+        )  ## List of all the indexed of vessels that have already been scheduled in the current time step
+
+        vessels_state_list = [
+            (-1, -1, idx) for idx in range(self.N)
+        ]  # Set initial state for each vessel
+        berth = [
+            0
+        ] * self.N  ## This variable represent the berth ocuppation in a given state, if at the index i the value is 0, then the section is empty, if the value is a different positive value, then the section will be occupied for the next berth[i] time units
+
+        ## Create the initial state
+        self.initial = State(
+            0,
+            vessels_state_list,
+            berth,
+            scheduled_vessels,
+            arrived_vessels,
+            not_arrived_vessels,
+            0,
+        )
 
     def result(self, state: State, action: tuple):
         """
@@ -145,38 +215,69 @@ class BAProblem(search.Problem):
 
         Parameters:
         - state (State): The current state.
-        - action (tuple): The action to be performed, containing the new time, berth space, and vessel index.
+        - action (tuple): The action to be performed, containing the new time, berth space, and vessel index. The actions can be of two types:
+            1.  The time associated with the action is greater than the current time of the state, and both the vessel_idx and the berth size are -1, meaning that no vessel is being scheduled to moore in this action
+            2. The time associated with the action is the same as the current time of the state, and both the vessel_idx and the berth_size must different than -1, meaning that a vessel is being scheduled to moore in the this action
 
         Returns:
         - State: The new state after executing the action.
         """
-        new_time, berth_space, vessel_idx = action  # Unpack the action parameters
+        action_time, berth_space, boat = action  # Unpack the action parameters
 
-        if vessel_idx != -1:
-            # Action is to moor a vessel
-            new_vessels = list(state.vessels)  # Convert to list for modification
-            vessel = list(new_vessels[vessel_idx])  # Convert to list to modify the specific vessel
-            vessel[MOORING_TIME] = new_time  # Update mooring time
-            vessel[BERTH_SECTION] = berth_space  # Update berth section
+        ## Get copy of the previous state variables for later manipulation to the new state
+        boats_arrived = list(state.boats_arrived)
+        boats_scheduled = list(state.boats_scheduled)
+        boats_not_arrived = list(state.boats_not_arrived)
+        vessels_state_list = list(state.vessels)
+        berth = list(state.berth)
 
-            ## ADD the vessel to berth
-            new_breth = list(state.berth)
-            for i in range(self.vessels[vessel[VESSEL_INDEX]]["s"]):
-                new_breth[i] = self.vessels[vessel[VESSEL_INDEX]][p]
+        if action_time == state.time:
+            ## A boat is being scheduled to moore in the current time step
 
-            new_vessels[vessel_idx] = tuple(vessel)  # Convert back to tuple after modification
-            return State(
-                new_time,
-                tuple(new_vessels),
-                state.cost + self.action_cost(action) # Compute new cost
+            ## Update the state of the vessel that is being scheduled
+            boats_scheduled.append(boat)
+            #print(f"Boats_arrived : {boats_arrived}, Boats : {boat},  vessels: {self.vessels}, time :{state.time}, action_time : {action_time}")
+            #print(f"boats_arrived {boats_arrived}, boat {boat} ")
+            boats_arrived.remove(boat)
+            vessels_state_list[boat] = (action_time, berth_space, boat)
+
+            for i in range(self.vessels[boat]["s"]):
+                berth[berth_space + i] = self.vessels[boat]["p"]
+
+            ## Create the new state
+            return State (
+                action_time,
+                vessels_state_list,
+                berth,
+                boats_scheduled,
+                boats_arrived,
+                boats_not_arrived,
+                state.cost + self.action_cost(action)
             )
+
         else:
-            # Action is to wait until new_time
-            ## !! go back in the berth times the time we advanced
+            ## No boat is being scheduled to moore in the current time step
+
+            ## Update the boats_arrived and boats_not_arrived list taking into consideration how much time passed between the two actions
+            for boat_not_arrived in boats_not_arrived:
+                if self.vessels[boat_not_arrived]["a"] <= action_time:
+                    boats_arrived.append(boat_not_arrived)
+                    boats_not_arrived.remove(boat_not_arrived)
+
+            ## Update the berth occupancy list taking into consideration how much time passed between the two actions
+            time_diff = action_time - state.time
+            for i in range(len(berth)):
+                berth[i] = max(0, berth[i] - time_diff)
+
+            ## Create the new state
             return State(
-                new_time,
-                state.vessels,
-                state.cost,  # Cost remains the same since no boat was scheduled, only heuristic will change
+                action_time,
+                vessels_state_list,
+                berth,
+                boats_scheduled,
+                boats_arrived,
+                boats_not_arrived,
+                state.cost
             )
 
     def actions(self, state: State) -> list:
@@ -191,104 +292,68 @@ class BAProblem(search.Problem):
         """
         actions = []  # Initialize actions list
 
-        ## ONLY THE INDEXES OF THE VESSEL ARE RETURN
-        boats_not_scheduled = [
-            vessel for vessel in state.vessels if vessel[MOORING_TIME] == -1  # Identify vessels that are not scheduled
-        ]
-        boats_scheduled = [
-            vessel for vessel in state.vessels if vessel[MOORING_TIME] != -1  # Identify vessels that are scheduled
-        ]
-
         # Build berth occupancy
-        # Berth is represented as a list of availability at each berth section
-        berth = [1] * self.S  # Initialize berth availability, 1 means available, 0 means occupied
+        berth = (
+            state.berth
+        )
 
-        # Build a list of currently scheduled vessels and their processing end times
-        scheduled_vessels_end_times = []  # Store end times of scheduled vessels
-
-        # Fill the berth array with the vessels that are scheduled
-        for vessel in boats_scheduled:
-            vessel_idx = vessel[VESSEL_INDEX]  # Get the vessel index
-            vessel_info = self.vessels[vessel_idx]  # Get the vessel information
-            mooring_time = vessel[MOORING_TIME]  # Get mooring time
-            berth_section = vessel[BERTH_SECTION]  # Get berth section
-            processing_end_time = mooring_time + vessel_info["p"]  # Calculate processing end time
-
-            if state.time >= mooring_time and state.time < processing_end_time:
-                # Vessel is currently in berth
-                s = berth_section
-                e = berth_section + vessel_info["s"]  # Calculate the end section for the vessel
-
-                for i in range(s, e):
-                    berth[i] = 0  # Mark the berth section as occupied
-
-            scheduled_vessels_end_times.append(processing_end_time)  # Store the processing end time
-
-        # Create cumulative sum array for berth availability
-        berth_cumsum = [0] * (self.S + 1)  # Initialize cumulative sum array
+    # Create cumulative sum array for berth availability -> THIS IS SUPER INEFFICIENT BUT IS WORKING I WILL LEAVE FOR NOW
+        berth_cumsum = [0] * (self.S)
         for i in range(self.S):
-            berth_cumsum[i + 1] = berth_cumsum[i] + berth[i]  # Calculate cumulative sum
+            if berth[i] != 0:
+                berth_cumsum[i] = 0
+            else:
+                berth_cumsum[i] = 1
+                for j in range(i + 1, self.S):
+                    if berth[j] != 0:
+                        break
+                    berth_cumsum[i] += 1
 
-        # Get vessels that have arrived and are not yet scheduled
-        boats_arrived = [
-            vessel
-            for vessel in boats_not_scheduled
-            if self.vessels[vessel[VESSEL_INDEX]]["a"] <= state.time  # Filter vessels that have arrived
-        ]
-
-        # If there are arrived boats, try to schedule them
-        for vessel in boats_arrived:
-            vessel_idx = vessel[VESSEL_INDEX]  # Get vessel index
-            vessel_info = self.vessels[vessel_idx]  # Get vessel information
+        ## Schedule all boats that have already arrived and are in queue for mooring
+        for boat_idx in state.boats_arrived:
+            vessel = self.vessels[boat_idx]  # Get vessel information
+            vessel_info = self.vessels[boat_idx]  # Get vessel information
             vessel_size = vessel_info["s"]  # Get vessel size
 
-            # Find positions where berth[i:i+vessel_size] are all 1s (available)
             for i in range(self.S - vessel_size + 1):
-                if berth_cumsum[i + vessel_size] - berth_cumsum[i] == vessel_size:
-                    actions.append((state.time, i, vessel_idx))  # Add scheduling action
+                if berth_cumsum[i] >= vessel_size:
+                    actions.append((state.time, i, boat_idx))
 
-        # Determine if there are boats that haven't arrived yet
-        arrival_times = [
-            self.vessels[vessel[VESSEL_INDEX]]["a"]
-            for vessel in boats_not_scheduled
-            if self.vessels[vessel[VESSEL_INDEX]]["a"] > state.time  # Get arrival times of unscheduled vessels
-        ]
 
-        if arrival_times:
+        ## The only action we can do now, after addind all scheduling options, is to wait for the next event that happens.
+        # We can characterize and event as being the next a boat leave the berth, if we have boats in a pending situation, or if a when a new boat arrives, and the next event will be the one that takes less time to happen of these.
+        # If the berth is empty in any given moment, we cannot wait for a boat to leave, we can only wait for the next boat to arrive
+
+        #print(f"state.time {state.time}, actions: {actions}, arrived : {state.boats_arrived}, scheduled {state.boats_scheduled}, not arrived {state.boats_not_arrived}, berth {berth}, berth_cumsum{berth_cumsum}")
+
+
+        ## Compute next time something changes
+        if len(state.boats_not_arrived) > 0:
             # There are vessels that haven't arrived yet
             # Compute the next event times
-            completion_times = [
-                end_time
-                for end_time in scheduled_vessels_end_times
-                if end_time > state.time  # Get end times of scheduled vessels
-            ]
 
-            next_times = arrival_times + completion_times  # Combine arrival and completion times
+            min_completion_times = min([b for b in berth if b != 0], default=float('inf'))
+            next_arrival = min([self.vessels[boat]["a"] for boat in state.boats_not_arrived])
 
-            if next_times:
-                next_time = min(next_times)  # Get the earliest time
-                # Add an action to wait until next_time
-                actions.append((next_time, -1, -1))  # Waiting action
+            next_time = min([next_arrival, min_completion_times])  # Combine arrival and completion times
+
+            actions.append((next_time + state.time, -1, -1))  # Waiting action
         else:
             # All vessels have arrived
             # Only consider waiting if there are no scheduling actions
-            if not actions:
+            if len(actions) == 0:
+
                 # No possible scheduling actions, need to wait for berth space to become available
-                completion_times = [
-                    end_time
-                    for end_time in scheduled_vessels_end_times
-                    if end_time > state.time  # Get end times of scheduled vessels
-                ]
+                min_completion_times = min([b for b in berth if b != 0], default=float('inf'))
 
-                if completion_times:
-                    next_time = min(completion_times)  # Get the earliest completion time
-                    # Add an action to wait until next_time
-                    actions.append((next_time, -1, -1))  # Waiting action
+                if min_completion_times != float('inf'):
+                    actions.append((min_completion_times + state.time, -1, -1))  # Waiting action
 
+        #print(actions)
         return actions  # Return the list of possible actions
 
-    def h (self, node):
-        '''
+    def h(self, node):
+        """
         Returns the heuristic valus of the state associated with the node
 
         Currently the heuristic works as follows:
@@ -299,15 +364,35 @@ class BAProblem(search.Problem):
             This heuristic is admissible since it never overestimates the cost of reaching the goal, since the minima flow time we can have for allocating a boat is to allocate it at the current time step, and since this is what the heuristic computes, we make sure and overestimation never happens
 
             !! TALK about consistency for this heuristic although i cannot understand if this is consistent of not
-        '''
+        """
         state = node.state
+        #zero_groups = (len(list(group)) for key, group in groupby(lst) if key == 0)
+        ## Return the maximum length of consecutive zeros
+        #return max(zero_groups, default=0)
+        def get_next_schedule_time(berth, vessel_size):
+            time = 0
+
+            while True:
+                zero_groups = (len(list(group)) for key, group in groupby(berth) if key == 0)
 
 
-        heuristic =  sum([
-            self.vessels[vessel[VESSEL_INDEX]]["w"]*(state.time + self.vessels[vessel[VESSEL_INDEX]]["p"] - self.vessels[vessel[VESSEL_INDEX]]["a"]) for vessel in state.vessels if vessel[MOORING_TIME] == -1 and self.vessels[VESSEL_INDEX]["a"] <= state.time
-        ])
+                if max(zero_groups, default=0) >= vessel_size:
+                    return time
+                #print(f"max : {max(zero_groups, default=0)} vessel_size : {vessel_size}  time : {time} berth : {berth}")
+                min_time = min([b for b in berth if b != 0], default=1)
+                time += min_time
+                berth = [max(b - min_time, 0) for b in berth]
 
-        #print(f"State.time : {state.time} - state.vessels : {state.vessels} - state.cost : {state.cost} - heuristic : {heuristic} + total_cost : {state.cost + heuristic}")
+        heuristic = 0
+
+        for boat_idx in state.boats_arrived:
+            vessel = self.vessels[boat_idx]  # Get vessel information
+            next_available_time = get_next_schedule_time(list(state.berth), vessel["s"])
+
+            #print(f"heuristic Data : time {state.time} next_available_time {next_available_time} vessel {vessel}")
+            heuristic += vessel["w"] * (state.time + next_available_time + vessel["p"] - vessel["a"])
+
+        #print(f"heuristic : {heuristic}")
 
         return heuristic
 
@@ -325,7 +410,7 @@ class BAProblem(search.Problem):
         """
         action_time, berth_space, vessel_idx = action
         vessel = self.vessels[vessel_idx]
-        return vessel["w"] * (action_time +  vessel["p"] - vessel["a"])
+        return vessel["w"] * (action_time + vessel["p"] - vessel["a"])
 
     def path_cost(self, c, state1, action, state2):
         """
@@ -343,7 +428,7 @@ class BAProblem(search.Problem):
         action_time, berth_space, vessel_idx = action
         if berth_space == -1:
             return c
-        #print(f"Path Cost : {c} + {self.action_cost(action)}")
+        #print(f"Path Cost : {c} + {self.action_cost(action)} -  action {action}")
         return c + self.action_cost(action)  # Return updated cost
 
     def goal_test(self, state):
@@ -356,7 +441,9 @@ class BAProblem(search.Problem):
         Returns:
         - bool: True if the goal is achieved (all vessels moored), False otherwise.
         """
-        return all(vessel[MOORING_TIME] != -1 for vessel in state.vessels)  # Check if all vessels are moored
+        return all(
+            vessel[MOORING_TIME] != -1 for vessel in state.vessels
+        )  # Check if all vessels are moored
 
     def solve(self):
         """
@@ -369,14 +456,14 @@ class BAProblem(search.Problem):
         solution = search.astar_search(self, self.h, False)
         time_end = time.time()
         if solution is not None:
-            #print(f"Solution : {solution.state.vessels_position} cost : {solution.path_cost} time : {time_end - time_star}")
+            print(f"Solution : {solution.state.vessels_position} cost : {solution.path_cost} time : {time_end - time_star}")
             print(solution.depth)
-            return solution.state.vessels_position  # Return the position of vessels in the solution
-
+            return (
+                solution.state.vessels_position
+            )  # Return the position of vessels in the solution
 
 
 if __name__ == "__main__":
-
     def get_test_files(test_dir="Tests"):
         """
         Retrieves test files from the specified directory.
@@ -398,13 +485,15 @@ if __name__ == "__main__":
     test_files = get_test_files()  # Retrieve test files
 
     # Optionally filter test files
-    test_files = [test for test in test_files if "108" in test]  # Filter test files based on naming
+    test_files = [
+        test for test in test_files if "101" in test
+    ]  # Filter test files based on naming
 
     for test in test_files:  # Iterate over the test files
         with open(test) as fh:  # Open the test file
             problem = BAProblem()  # Create an instance of BAProblem
             problem.load(fh)  # Load the problem from the file
             print(f"Test {test}")  # Print the name of the test file
-            with Profile() as p:
-                problem.solve()
-                Stats(p).print_stats()
+#            with Profile() as p:
+            problem.solve()
+ #               Stats(p).print_stats()
