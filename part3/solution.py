@@ -3,12 +3,13 @@ import search  # Importing the search module which contains algorithms for solvi
 import time  # Importing time module for time-related functions
 import os  # Importing os module for interacting with the operating system
 from itertools import groupby
+import numpy as np
 
 
-#from cProfile import (
-#    Profile,
-#)  # Importing the Profile class from cProfile module for profiling
-#from pstats import Stats  # Importing the Stats class from pstats module for statistics
+from cProfile import (
+    Profile,
+)  # Importing the Profile class from cProfile module for profiling
+from pstats import Stats  # Importing the Stats class from pstats module for statistics
 
 # Constants for vessel state indices
 MOORING_TIME = 0  # Index for the mooring time of the vessel
@@ -94,15 +95,14 @@ class State:
         """
         Checks if two states are equal based on their hash values.
         """
-        # return self.vessels == other.vessels and self.time == other.time  # Compare the hash values for equality
-        return self._hash == other._hash
+        return self.vessels == other.vessels and self.time == other.time  # Compare the hash values for equality
+        #return self._hash == other._hash
 
     def __lt__(self, other):
         """
         For priority queue comparison, determines if this state has a lower cost than another state.
         """
         return self.cost < other.cost  # Compare based on cost
-
 
 class BAProblem(search.Problem):
     """
@@ -259,10 +259,16 @@ class BAProblem(search.Problem):
             ## No boat is being scheduled to moore in the current time step
 
             ## Update the boats_arrived and boats_not_arrived list taking into consideration how much time passed between the two actions
+            boats_to_remove = []
+
             for boat_not_arrived in boats_not_arrived:
                 if self.vessels[boat_not_arrived]["a"] <= action_time:
                     boats_arrived.append(boat_not_arrived)
-                    boats_not_arrived.remove(boat_not_arrived)
+                    boats_to_remove.append(boat_not_arrived)
+
+            for boat_to_remove in boats_to_remove:
+                boats_not_arrived.remove(boat_to_remove)
+
 
             ## Update the berth occupancy list taking into consideration how much time passed between the two actions
             time_diff = action_time - state.time
@@ -297,17 +303,9 @@ class BAProblem(search.Problem):
             state.berth
         )
 
-    # Create cumulative sum array for berth availability -> THIS IS SUPER INEFFICIENT BUT IS WORKING I WILL LEAVE FOR NOW
-        berth_cumsum = [0] * (self.S)
+        berth_cumsum = [0] * (self.S + 1)
         for i in range(self.S):
-            if berth[i] != 0:
-                berth_cumsum[i] = 0
-            else:
-                berth_cumsum[i] = 1
-                for j in range(i + 1, self.S):
-                    if berth[j] != 0:
-                        break
-                    berth_cumsum[i] += 1
+            berth_cumsum[i + 1] = berth_cumsum[i] + 1 if berth[i] == 0 else 0
 
         ## Schedule all boats that have already arrived and are in queue for mooring
         for boat_idx in state.boats_arrived:
@@ -315,41 +313,25 @@ class BAProblem(search.Problem):
             vessel_info = self.vessels[boat_idx]  # Get vessel information
             vessel_size = vessel_info["s"]  # Get vessel size
 
+            ## Append 1 action per boat
             for i in range(self.S - vessel_size + 1):
-                if berth_cumsum[i] >= vessel_size:
+                if berth_cumsum[i + vessel_size] - berth_cumsum[i] == vessel_size:
                     actions.append((state.time, i, boat_idx))
-
+                    break
 
         ## The only action we can do now, after addind all scheduling options, is to wait for the next event that happens.
         # We can characterize and event as being the next a boat leave the berth, if we have boats in a pending situation, or if a when a new boat arrives, and the next event will be the one that takes less time to happen of these.
         # If the berth is empty in any given moment, we cannot wait for a boat to leave, we can only wait for the next boat to arrive
 
-        #print(f"state.time {state.time}, actions: {actions}, arrived : {state.boats_arrived}, scheduled {state.boats_scheduled}, not arrived {state.boats_not_arrived}, berth {berth}, berth_cumsum{berth_cumsum}")
+        time_delta_to_next_departure = min([b + state.time for b in berth if b != 0], default=float('inf'))
+        time_delta_to_next_arrival = min([self.vessels[boat]["a"] for boat in state.boats_not_arrived], default=float('inf'))
 
+        next_event_time = min(time_delta_to_next_departure, time_delta_to_next_arrival)
 
-        ## Compute next time something changes
-        if len(state.boats_not_arrived) > 0:
-            # There are vessels that haven't arrived yet
-            # Compute the next event times
+        ## Can always try to go the next step without any action
+        if next_event_time != float('inf'):
+            actions.append((next_event_time, -1, -1))
 
-            min_completion_times = min([b for b in berth if b != 0], default=float('inf'))
-            next_arrival = min([self.vessels[boat]["a"] for boat in state.boats_not_arrived])
-
-            next_time = min([next_arrival, min_completion_times])  # Combine arrival and completion times
-
-            actions.append((next_time + state.time, -1, -1))  # Waiting action
-        else:
-            # All vessels have arrived
-            # Only consider waiting if there are no scheduling actions
-            if len(actions) == 0:
-
-                # No possible scheduling actions, need to wait for berth space to become available
-                min_completion_times = min([b for b in berth if b != 0], default=float('inf'))
-
-                if min_completion_times != float('inf'):
-                    actions.append((min_completion_times + state.time, -1, -1))  # Waiting action
-
-        #print(actions)
         return actions  # Return the list of possible actions
 
     def h(self, node):
@@ -359,40 +341,31 @@ class BAProblem(search.Problem):
         Currently the heuristic works as follows:
             For a given state in the search problem, the cost we have to pay is the sum of the flow time of all the scheduled vessels, with this we can see that by never scheduling a vessel we will fall into infinite solution space, since the cost of adding a boat will always be bigger than the cost of not adding it.
 
-            To mitigate this, the heuristic applied was to simply assume we can add all the boats in the waiting list in the current time step, and then the heuristic value is the sum of the flow time of all the vessels in the waiting list, when they are added to the berth in the current step.
+            To mitigate this we compute the next time the berth will have a free space the size of each of the boats in waiting assuming the current allocation, and we assume we insert the boat at that time.
 
             This heuristic is admissible since it never overestimates the cost of reaching the goal, since the minima flow time we can have for allocating a boat is to allocate it at the current time step, and since this is what the heuristic computes, we make sure and overestimation never happens
 
             !! TALK about consistency for this heuristic although i cannot understand if this is consistent of not
         """
         state = node.state
-        #zero_groups = (len(list(group)) for key, group in groupby(lst) if key == 0)
-        ## Return the maximum length of consecutive zeros
-        #return max(zero_groups, default=0)
+
         def get_next_schedule_time(berth, vessel_size):
-            time = 0
-
-            while True:
-                zero_groups = (len(list(group)) for key, group in groupby(berth) if key == 0)
-
-
-                if max(zero_groups, default=0) >= vessel_size:
-                    return time
-                #print(f"max : {max(zero_groups, default=0)} vessel_size : {vessel_size}  time : {time} berth : {berth}")
-                min_time = min([b for b in berth if b != 0], default=1)
-                time += min_time
-                berth = [max(b - min_time, 0) for b in berth]
+            min_ = float('inf')
+            for i in range(self.S - vessel_size + 1):
+                min_ = min(min_, max(berth[i:i + vessel_size]))
+            return min_
 
         heuristic = 0
 
+        times_dict  = {}
         for boat_idx in state.boats_arrived:
             vessel = self.vessels[boat_idx]  # Get vessel information
-            next_available_time = get_next_schedule_time(list(state.berth), vessel["s"])
+            next_available_time = times_dict[vessel["s"]] if vessel["s"] in times_dict else get_next_schedule_time(list(state.berth), vessel["s"])
+            times_dict[vessel["s"]] = next_available_time
 
-            #print(f"heuristic Data : time {state.time} next_available_time {next_available_time} vessel {vessel}")
             heuristic += vessel["w"] * (state.time + next_available_time + vessel["p"] - vessel["a"])
 
-        #print(f"heuristic : {heuristic}")
+        print(f"berth  {state.berth} vessels {state.vessels} cost {state.cost} heuristic : {heuristic} total {state.cost + heuristic} time {state.time} arrived {state.boats_arrived} scheduled {state.boats_scheduled}")
 
         return heuristic
 
@@ -425,10 +398,9 @@ class BAProblem(search.Problem):
         Returns:
         - int: The total cost after performing the action.
         """
-        action_time, berth_space, vessel_idx = action
+        _, berth_space, _ = action
         if berth_space == -1:
             return c
-        #print(f"Path Cost : {c} + {self.action_cost(action)} -  action {action}")
         return c + self.action_cost(action)  # Return updated cost
 
     def goal_test(self, state):
@@ -464,7 +436,7 @@ class BAProblem(search.Problem):
 
 
 if __name__ == "__main__":
-    def get_test_files(test_dir="Tests"):
+    def get_test_files(test_dir="TestePart3"):
         """
         Retrieves test files from the specified directory.
 
@@ -486,7 +458,7 @@ if __name__ == "__main__":
 
     # Optionally filter test files
     test_files = [
-        test for test in test_files if "101" in test
+        test for test in test_files if "108" in test
     ]  # Filter test files based on naming
 
     for test in test_files:  # Iterate over the test files
@@ -494,6 +466,6 @@ if __name__ == "__main__":
             problem = BAProblem()  # Create an instance of BAProblem
             problem.load(fh)  # Load the problem from the file
             print(f"Test {test}")  # Print the name of the test file
-#            with Profile() as p:
-            problem.solve()
- #               Stats(p).print_stats()
+            with Profile() as p:
+                problem.solve()
+                Stats(p).sort_stats('tottime').print_stats()
