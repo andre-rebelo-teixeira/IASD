@@ -317,22 +317,31 @@ class BAProblem(search.Problem):
     def heuristic(self, node):
         """
         Heuristic function for A* search, applied to a node.
-
+    
         Parameters:
         - node (Node): The current node, which contains a state.
-
+    
         Returns:
         - int: The heuristic estimate of the remaining cost.
         """
         state = node.state  # Get the state from the node
-        remaining_cost = 0
+        current_cost = state.cost  # Get the current cost of the state
+        total_estimated_cost = current_cost  # Start with the current cost
+        latest_time = state.time  # Track the latest time for vessels already moored
+    
+        # Calculate the cost for vessels that are not yet moored
         for vessel in state.vessels:
             if vessel[MOORING_TIME] == -1:  # Vessel not scheduled
                 vessel_info = self.vessels[vessel[VESSEL_INDEX]]
-                remaining_cost += (
-                    vessel_info["p"] * vessel_info["w"]
-                )  # Weighted remaining processing time
-        return remaining_cost
+                # Add the cost of mooring this vessel at the latest time
+                total_estimated_cost += (
+                    latest_time + vessel_info["p"] - vessel_info["a"]
+                ) * vessel_info["w"]  # Weighted remaining processing time
+                # Update the latest_time for the next vessel
+                latest_time += vessel_info["s"]  # Update for the space needed
+    
+        return total_estimated_cost
+
 
     def solve(self):
         """
