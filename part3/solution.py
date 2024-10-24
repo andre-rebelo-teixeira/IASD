@@ -6,10 +6,10 @@ from itertools import groupby
 import numpy as np
 
 
-from cProfile import (
-    Profile,
-)  # Importing the Profile class from cProfile module for profiling
-from pstats import Stats  # Importing the Stats class from pstats module for statistics
+#from cProfile import (
+#    Profile,
+#)  # Importing the Profile class from cProfile module for profiling
+#from pstats import Stats  # Importing the Stats class from pstats module for statistics
 
 # Constants for vessel state indices
 MOORING_TIME = 0  # Index for the mooring time of the vessel
@@ -209,6 +209,7 @@ class BAProblem(search.Problem):
             0,
         )
 
+    # This method seem to be working correctly
     def result(self, state: State, action: tuple):
         """
         Returns the state that results from executing the given action in the given state.
@@ -236,8 +237,6 @@ class BAProblem(search.Problem):
 
             ## Update the state of the vessel that is being scheduled
             boats_scheduled.append(boat)
-            #print(f"Boats_arrived : {boats_arrived}, Boats : {boat},  vessels: {self.vessels}, time :{state.time}, action_time : {action_time}")
-            #print(f"boats_arrived {boats_arrived}, boat {boat} ")
             boats_arrived.remove(boat)
             vessels_state_list[boat] = (action_time, berth_space, boat)
 
@@ -259,21 +258,16 @@ class BAProblem(search.Problem):
             ## No boat is being scheduled to moore in the current time step
 
             ## Update the boats_arrived and boats_not_arrived list taking into consideration how much time passed between the two actions
-            boats_to_remove = []
 
-            for boat_not_arrived in boats_not_arrived:
+            for boat_not_arrived in boats_not_arrived[:]:
                 if self.vessels[boat_not_arrived]["a"] <= action_time:
                     boats_arrived.append(boat_not_arrived)
-                    boats_to_remove.append(boat_not_arrived)
-
-            for boat_to_remove in boats_to_remove:
-                boats_not_arrived.remove(boat_to_remove)
+                    boats_not_arrived.remove(boat_not_arrived)
 
 
             ## Update the berth occupancy list taking into consideration how much time passed between the two actions
             time_diff = action_time - state.time
-            for i in range(len(berth)):
-                berth[i] = max(0, berth[i] - time_diff)
+            berth = [max(0, b - time_diff) for b in berth]
 
             ## Create the new state
             return State(
@@ -324,6 +318,7 @@ class BAProblem(search.Problem):
         # If the berth is empty in any given moment, we cannot wait for a boat to leave, we can only wait for the next boat to arrive
 
         time_delta_to_next_departure = min([b + state.time for b in berth if b != 0], default=float('inf'))
+
         time_delta_to_next_arrival = min([self.vessels[boat]["a"] for boat in state.boats_not_arrived], default=float('inf'))
 
         next_event_time = min(time_delta_to_next_departure, time_delta_to_next_arrival)
@@ -357,15 +352,19 @@ class BAProblem(search.Problem):
 
         heuristic = 0
 
-        times_dict  = {}
         for boat_idx in state.boats_arrived:
             vessel = self.vessels[boat_idx]  # Get vessel information
-            next_available_time = times_dict[vessel["s"]] if vessel["s"] in times_dict else get_next_schedule_time(list(state.berth), vessel["s"])
-            times_dict[vessel["s"]] = next_available_time
+            next_available_time = get_next_schedule_time(state.berth, vessel["s"])
 
             heuristic += vessel["w"] * (state.time + next_available_time + vessel["p"] - vessel["a"])
 
-        print(f"berth  {state.berth} vessels {state.vessels} cost {state.cost} heuristic : {heuristic} total {state.cost + heuristic} time {state.time} arrived {state.boats_arrived} scheduled {state.boats_scheduled}")
+        for boat_idx in state.boats_not_arrived:
+            vessel = self.vessels[boat_idx]
+            next_available_time = get_next_schedule_time(list(state.berth), vessel["s"])
+
+            next_available_time = max(next_available_time, vessel["a"])
+
+            heuristic += vessel["w"] * (next_available_time + vessel["p"] - vessel["a"])
 
         return heuristic
 
@@ -466,6 +465,6 @@ if __name__ == "__main__":
             problem = BAProblem()  # Create an instance of BAProblem
             problem.load(fh)  # Load the problem from the file
             print(f"Test {test}")  # Print the name of the test file
-            with Profile() as p:
-                problem.solve()
-                Stats(p).sort_stats('tottime').print_stats()
+#            with Profile() as p:
+            problem.solve()
+ #               Stats(p).sort_stats('tottime').print_stats()
