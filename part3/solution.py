@@ -196,7 +196,7 @@ class BAProblem(search.Problem):
         ]  # Set initial state for each vessel
         berth = [
             0
-        ] * self.N  ## This variable represent the berth ocuppation in a given state, if at the index i the value is 0, then the section is empty, if the value is a different positive value, then the section will be occupied for the next berth[i] time units
+        ] * self.S  ## This variable represent the berth ocuppation in a given state, if at the index i the value is 0, then the section is empty, if the value is a different positive value, then the section will be occupied for the next berth[i] time units
 
         ## Create the initial state
         self.initial = State(
@@ -347,7 +347,7 @@ class BAProblem(search.Problem):
         def get_next_schedule_time(berth, vessel_size):
             min_ = float('inf')
             for i in range(self.S - vessel_size + 1):
-                min_ = min(min_, max(berth[i:i + vessel_size]))
+                min_ = min(min_, max(berth[i:i + vessel_size], default=float('inf')))
             return min_
 
         heuristic = 0
@@ -397,8 +397,8 @@ class BAProblem(search.Problem):
         Returns:
         - int: The total cost after performing the action.
         """
-        _, berth_space, _ = action
-        if berth_space == -1:
+        _, berth_space, vessel_space = action
+        if berth_space == -1 and vessel_space == -1:
             return c
         return c + self.action_cost(action)  # Return updated cost
 
