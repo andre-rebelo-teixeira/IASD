@@ -6,16 +6,10 @@ from itertools import groupby
 import numpy as np
 from functools import lru_cache
 
-#from cProfile import (
-#    Profile,
-#)  # Importing the Profile class from cProfile module for profiling
-#from pstats import Stats  # Importing the Stats class from pstats module for statistics
-
 # Constants for vessel state indices
 MOORING_TIME = 0  # Index for the mooring time of the vessel
 BERTH_SECTION = 1  # Index for the berth section of the vessel
 VESSEL_INDEX = 2  # Index for the vessel identifier
-
 
 class State:
     """
@@ -95,8 +89,8 @@ class State:
         """
         Checks if two states are equal based on their hash values.
         """
-        return self.vessels == other.vessels and self.time == other.time  # Compare the hash values for equality
-        #return self._hash == other._hash
+        #return self.vessels == other.vessels and self.time == other.time  # Compare the hash values for equality
+        return self._hash == other._hash
 
     def __lt__(self, other):
         """
@@ -215,9 +209,7 @@ class BAProblem(search.Problem):
 
         Parameters:
         - state (State): The current state.
-        - action (tuple): The action to be performed, containing the new time, berth space, and vessel index. The actions can be of two types:
-            1.  The time associated with the action is greater than the current time of the state, and both the vessel_idx and the berth size are -1, meaning that no vessel is being scheduled to moore in this action
-            2. The time associated with the action is the same as the current time of the state, and both the vessel_idx and the berth_size must different than -1, meaning that a vessel is being scheduled to moore in the this action
+        - action (tuple): The action to be performed, containing the new time, berth space, and vessel index. In each action a vessel is always moored, if for a state the berth is full, then the action will more a vessel in the a future time
 
         Returns:
         - State: The new state after executing the action.
@@ -231,23 +223,28 @@ class BAProblem(search.Problem):
         vessels_state_list = list(state.vessels)
         berth = list(state.berth)
 
-        if  action_time > state.time:
+        ## Update the state variables to reflect the time of the new state, since new boats can arrive in between the time of the state and the time of the action
+        if state.time < action_time:
             for boat_not_arrived in boats_not_arrived[:]:
                 if self.vessels[boat_not_arrived]["a"] <= action_time:
                     boats_arrived.append(boat_not_arrived)
                     boats_not_arrived.remove(boat_not_arrived)
 
+        ## Update the state variables to reflect the boat that was moored
         boats_scheduled.append(boat)
         boats_arrived.remove(boat)
         
         ## Update the berth occupancy list taking into consideration how much time passed between the two actions
         berth = [max(0, b - (action_time - state.time)) for b in berth]
 
+        ## Insert the boat in the berth
         for i in range (self.vessels[boat]["s"]):
             berth[berth_space + i] = self.vessels[boat]["p"] 
 
+        ## Update the state of the boat that was moored
         vessels_state_list[boat] = action
 
+        ## Return the new updated state
         return State(
             action_time,
             vessels_state_list,
@@ -261,10 +258,22 @@ class BAProblem(search.Problem):
     @staticmethod
     @lru_cache(maxsize=None)
     def get_next_available_time_and_berth(berth, vessel_size):
+        '''
+        This method computes the next time and position a vessel is able to be inserted in the berth, given the current berth occupancy, it returns only the first possible position and time, since otherwise the branching factor would be too big for the rest of our code to handle, this could lead to a suboptimal solution, but the tradeoff needed to be done
+
+        Parameters:
+            - berth (list): A list representing the current berth occupancy
+            - vessel_size (int): The size of the vessel to be inserted
+
+        Returns:
+            - tuple: A tuple containing the time and position the vessel can be inserted
+
+        '''
         berth = tuple(berth)
         min_time = float('inf')
         berth_new = -1
 
+        ## Moves through all the subarrays of the berth that have the size of the vessel trying to be inserted, and computes the minimum time required
         for i in range(len(berth) - vessel_size + 1):
             min_time_new = max(berth[i:i + vessel_size])
             if min_time_new < min_time:
@@ -274,6 +283,18 @@ class BAProblem(search.Problem):
         return min_time, berth_new
 
     def generate_feasible_action_for_boat(self, berth, vessel_idx, vessel, state):
+        '''
+        This method generates a feasible action for a given boat, this action is the one that will be executed in the current state, and will be the one that will be used to generate the next state. This takes into consideration that a certain boat might have an opening in the berth before arriving, but can only be inserted when it arrived
+
+        Parameters:
+            - berth (list): A list representing the current berth occupancy
+            - vessel_idx (int): The index of the vessel to be inserted
+            - vessel (dict): The dictionary representing the vessel to be inserted
+            - state (State): The current state
+        
+        Returns:
+            - tuple: A tuple containing the time, position and index of the vessel to be inserted
+        '''
         time, berth_space = self.get_next_available_time_and_berth(tuple(berth), vessel["s"])
 
         return (max(time + state.time, vessel["a"]), berth_space, vessel_idx)
@@ -290,7 +311,7 @@ class BAProblem(search.Problem):
         """
         actions = []  # Initialize actions list
 
-                ## Schedule all boats that have already arrived and are in queue for mooring
+        ## Itterates over all the unscheduled boats and generates the first feaseble action for each 
         for boat_idx in state.boats_arrived[:] + state.boats_not_arrived[:]:
             vessel = self.vessels[boat_idx]  # Get vessel information
             vessel_info = self.vessels[boat_idx]  # Get vessel information
@@ -298,32 +319,51 @@ class BAProblem(search.Problem):
 
             actions.append(self.generate_feasible_action_for_boat(state.berth, boat_idx, vessel, state))
 
-        #print(f"actions {actions} berth {state.berth} vessels{state.vessels} scheduled {state.boats_scheduled}")\
-
         return actions  # Return the list of possible actions
 
     def h(self, node):
         """
         Returns the heuristic valus of the state associated with the node
 
-        Currently the heuristic works as follows:
-            For a given state in the search problem, the cost we have to pay is the sum of the flow time of all the scheduled vessels, with this we can see that by never scheduling a vessel we will fall into infinite solution space, since the cost of adding a boat will always be bigger than the cost of not adding it.
+        The current heuristic itterates over all the boats already arrived and not scheduled and computes the minimal weighted flow that it can be acheived when scheduling it, knowing the current berth occupation. 
 
-            To mitigate this we compute the next time the berth will have a free space the size of each of the boats in waiting assuming the current allocation, and we assume we insert the boat at that time.
+        This means that for all the boats in waiting we compute the next time that the berth will have an openning of their size, we do not care for conflits in these hipotetical insertions, and this way we make sure we can never estimate the cost of the heuristic to be higher that the real cost of the solution
 
-            This heuristic is admissible since it never overestimates the cost of reaching the goal, since the minima flow time we can have for allocating a boat is to allocate it at the current time step, and since this is what the heuristic computes, we make sure and overestimation never happens
+        From this we know that our heuristic is admissible since it never overestimates the cost of the solution
 
-            !! TALK about consistency for this heuristic although i cannot understand if this is consistent of not
+        We can also see that the heuristic is consistent since the cost of the solution is always greater or equal to the cost of the heuristic, since in out best case scenario when we apply an action and insert a boat, we leave enough space in the bearth all the boats in waiting, meaning the heuristic of the node we move to MUST always be less or equal to the cost of a node we move to and the heurist.
+
+        
+        Parameters:
+            - node (Node): The node to be evaluated.
+        
+        Returns:
+            - int: The heuristic value of the node.
         """
         state = node.state
 
         heuristic = 0
 
+        @lru_cache(maxsize = None)
+        def get_next_available_berth_time(berth, vessel_size, berth_size): 
+            '''
+            Compute the next time a vessel can be inserted in the berth
+
+            Parameters:
+                - berth (list): A list representing the current berth occupancy
+                - vessel_size (int): The size of the vessel to be inserted
+                - berth_size (int): The size of the berth
+            
+            Returns:
+                - int: The time the vessel can be inserted
+            '''
+            return min( [max(berth[i:i + vessel_size]) for i in range(berth_size - vessel_size + 1)] )
+
+
         berth = tuple(state.berth)
         for boat_idx in state.boats_arrived:
             vessel = self.vessels[boat_idx]  # Get vessel information
-            next_available_time =  self.get_next_available_time_and_berth(tuple(berth), vessel["s"])[0]
-
+            next_available_time =  get_next_available_berth_time(berth, vessel["s"], self.S)
             heuristic += vessel["w"] * (state.time + next_available_time + vessel["p"] - vessel["a"])
 
         return heuristic
@@ -383,48 +423,8 @@ class BAProblem(search.Problem):
         Returns:
         - list: A solution in the specified format.
         """
-        time_star = time.time()
         solution = search.astar_search(self, self.h, False)
-        time_end = time.time()
         if solution is not None:
-            print(f"Solution : {solution.state.vessels_position} cost : {solution.path_cost} time : {time_end - time_star}")
-            print(solution.depth)
             return (
                 solution.state.vessels_position
             )  # Return the position of vessels in the solution
-
-
-if __name__ == "__main__":
-    def get_test_files(test_dir="TestePart3"):
-        """
-        Retrieves test files from the specified directory.
-
-        Parameters:
-        - test_dir (str): The directory to search for test files.
-
-        Returns:
-        - list: A list of test file paths.
-        """
-        if test_dir in os.listdir():  # Check if the test directory exists
-            return [
-                os.path.join(test_dir, file)
-                for file in os.listdir(test_dir)
-                if file.endswith(".dat")  # Filter for .dat files
-            ]
-        return []  # Return an empty list if no test files found
-
-    test_files = get_test_files()  # Retrieve test files
-
-    # Optionally filter test files
-    test_files = [
-        test for test in test_files if "100" in test
-    ]  # Filter test files based on naming
-
-    for test in test_files:  # Iterate over the test files
-        with open(test) as fh:  # Open the test file
-            problem = BAProblem()  # Create an instance of BAProblem
-            problem.load(fh)  # Load the problem from the file
-            print(f"Test {test}")  # Print the name of the test file
-#            with Profile() as p:
-            problem.solve()
- #               Stats(p).sort_stats('tottime').print_stats()
