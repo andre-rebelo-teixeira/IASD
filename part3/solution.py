@@ -66,7 +66,7 @@ class State:
         self.boats_not_arrived = boats_not_arrived
 
         self._hash = hash(
-            (self.time, self.vessels, self.cost)
+            (self.time, self.vessels)
         )  # Create a unique hash for the state
 
     @property
@@ -292,9 +292,14 @@ class BAProblem(search.Problem):
         """
         actions = []  # Initialize actions list
 
+        # Build berth occupancy
+        berth = (
+            state.berth
+        )
+
         berth_cumsum = [0] * (self.S + 1)
         for i in range(self.S):
-            berth_cumsum[i + 1] = berth_cumsum[i] + 1 if state.berth[i] == 0 else 0
+            berth_cumsum[i + 1] = berth_cumsum[i] + 1 if berth[i] == 0 else 0
 
         ## Schedule all boats that have already arrived and are in queue for mooring
         for boat_idx in state.boats_arrived:
@@ -306,12 +311,13 @@ class BAProblem(search.Problem):
             for i in range(self.S - vessel_size + 1):
                 if berth_cumsum[i + vessel_size] - berth_cumsum[i] == vessel_size:
                     actions.append((state.time, i, boat_idx))
+                    break
 
         ## The only action we can do now, after addind all scheduling options, is to wait for the next event that happens.
         # We can characterize and event as being the next a boat leave the berth, if we have boats in a pending situation, or if a when a new boat arrives, and the next event will be the one that takes less time to happen of these.
         # If the berth is empty in any given moment, we cannot wait for a boat to leave, we can only wait for the next boat to arrive
 
-        time_delta_to_next_departure = min([b + state.time for b in state.berth if b != 0], default=float('inf'))
+        time_delta_to_next_departure = min([b + state.time for b in berth if b != 0], default=float('inf'))
 
         time_delta_to_next_arrival = min([self.vessels[boat]["a"] for boat in state.boats_not_arrived], default=float('inf'))
 
@@ -338,11 +344,10 @@ class BAProblem(search.Problem):
         """
         state = node.state
 
-
         def get_next_schedule_time(berth, vessel_size):
             min_ = float('inf')
             for i in range(self.S - vessel_size + 1):
-                min_ = min(min_, max(berth[i:i + vessel_size]))
+                min_ = min(min_, max(berth[i:i + vessel_size], default=float('inf')))
             return min_
 
         heuristic = 0
@@ -355,76 +360,13 @@ class BAProblem(search.Problem):
 
         for boat_idx in state.boats_not_arrived:
             vessel = self.vessels[boat_idx]
-            next_available_time = get_next_schedule_time(state.berth, vessel["s"])
+            next_available_time = get_next_schedule_time(list(state.berth), vessel["s"])
+
+            next_available_time = max(next_available_time, vessel["a"])
+
             heuristic += vessel["w"] * (next_available_time + vessel["p"] - vessel["a"])
 
         return heuristic
-    # Heuristic 1: Earliest Possible Completion Time
-    def heuristic_earliest_completion(self, node):
-        """
-        Heuristic based on the earliest possible completion time for unscheduled vessels.
-        """
-        state = node.state
-        h_value = 0
-        for vessel_idx in state.boats_not_arrived:
-            vessel = self.vessels[vessel_idx]
-            mooring_time = max(0, state.time + vessel["p"] - vessel["a"])  # Time it takes to complete
-            h_value += vessel["w"] * mooring_time  # Weighted by vessel priority
-        return h_value
-
-
-    # Heuristic 2: Minimizing Berth Idle Time
-    def heuristic_minimize_idle_time(self, node):
-        """
-        Heuristic based on minimizing the berth idle time.
-        """
-        state = node.state
-        h_value = 0
-        next_event_time = state.time  # Assuming no other vessel mooring currently
-        for vessel_idx in state.boats_not_arrived:
-            vessel = self.vessels[vessel_idx]
-            idle_time = max(0, next_event_time - vessel["a"])  # Time until the next vessel can start mooring
-            h_value += vessel["w"] * (vessel["p"] + idle_time)
-        return h_value
-
-
-    # Heuristic 3: Gap-Based Scheduling Heuristic
-    def heuristic_gap_based(self, node):
-        """
-        Heuristic based on gap-based scheduling, trying to minimize idle berth slots.
-        """
-        state = node.state
-        h_value = 0
-        berth_cumsum = [0] * (self.S + 1)  # Cumulative sum of berth availability
-        for i in range(self.S):
-            berth_cumsum[i + 1] = berth_cumsum[i] + 1 if state.berth[i] == 0 else 0
-
-        for vessel_idx in state.boats_not_arrived:
-            vessel = self.vessels[vessel_idx]
-            vessel_size = vessel["s"]
-
-            for i in range(self.S - vessel_size + 1):
-                if berth_cumsum[i + vessel_size] - berth_cumsum[i] == vessel_size:
-                    # Vessel can be moored in this berth slot
-                    next_available_time = state.time  # Assuming it can be placed immediately
-                    h_value += vessel["w"] * (next_available_time + vessel["p"] - vessel["a"])
-                    break  # We only need one valid slot to schedule
-        return h_value
-
-
-    # Heuristic 4: Weighted Slack Time Heuristic
-    def heuristic_weighted_slack(self, node):
-        """
-        Heuristic based on the slack time (difference between arrival and current time) for unscheduled vessels.
-        """
-        state = node.state
-        h_value = 0
-        for vessel_idx in state.boats_not_arrived:
-            vessel = self.vessels[vessel_idx]
-            slack_time = max(0, vessel["a"] - state.time)  # Time until vessel arrives
-            h_value += vessel["w"] * slack_time
-        return h_value
-
 
     def action_cost(self, action):
         """
@@ -456,7 +398,7 @@ class BAProblem(search.Problem):
         - int: The total cost after performing the action.
         """
         _, berth_space, vessel_space = action
-        if berth_space == -1 or vessel_space == -1:
+        if berth_space == -1 and vessel_space == -1:
             return c
         return c + self.action_cost(action)  # Return updated cost
 
